@@ -1,6 +1,9 @@
 import os
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"  # Enables CPU fallback
-os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"  # Disable upper limit for memory allocations
+
+# Enable CPU fallback
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+# Disable upper limit for memory allocations
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
 
 import torch
 import torch.nn as nn
@@ -8,201 +11,322 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import time
 import json
-import argparse
 from pathlib import Path
 from tqdm import tqdm
 from librispeech import LibriSpeech
-from cnn import SpeechCNN
+from speech_lstm import SpeechLSTM
+import numpy as np
+import random
 
-# Default settings
-NUM_EPOCHS = 10
+# Set seed for reproducibility
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(seed)
+    random.seed(seed)
+
+set_seed()
+
+TRAIN_DATASET = "dev-clean"
+VAL_DATASET = "dev-other"  
+DATA_DIR = "./data"
 CHECKPOINT_DIR = "./checkpoints"
-BATCH_SIZE = 2  # Reduced batch size to prevent memory issues
+
+# Hyperparameters
+NUM_EPOCHS = 20
+BATCH_SIZE = 16  # Smaller batch size for better learning
+LEARNING_RATE = 5e-4  # Lower learning rate for more stability
+WEIGHT_DECAY = 1e-4
+GRAD_CLIP_MAX_NORM = 5.0
+BLANK_WEIGHT = 0.9  # Higher value = less penalty for blank tokens
+BLANK_PENALTY_SCALE = 0.1  # Scale factor for blank penalty
 
 # Create checkpoint directory if it doesn't exist
 Path(CHECKPOINT_DIR).mkdir(exist_ok=True)
 
 # Training Loop
-def train(model, dataloader, optimizer, criterion, device, epochs, start_epoch=0, best_loss=float('inf')):
+def train(model, dataloader, val_dataloader, optimizer, criterion, device, epochs, start_epoch=0, best_loss=float('inf')):
     model.to(device)
     
-    # Initialize stats dictionary
     stats = {
         "epochs": [],
-        "losses": [],
+        "train_losses": [],
+        "val_losses": [],
+        "learning_rates": [],
         "times": [],
-        "best_loss": best_loss
+        "best_train_loss": best_loss,
+        "best_val_loss": float('inf')
     }
     
-    # Main training loop with tqdm for progress tracking
+    input_lengths_cache = {}
+    
     for epoch in tqdm(range(start_epoch, epochs), desc="Training Progress"):
-        model.train()
+        model.train()  
         epoch_start_time = time.time()
         total_loss = 0.0
+        total_samples = 0  
         batch_count = 0
         
-        # Process batches
         for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
             spectrograms, transcripts = batch
+            batch_size = spectrograms.size(0)
             
-            # Move data to device
             spectrograms = spectrograms.to(device)
             
-            # Zero gradients
             optimizer.zero_grad()
             
-            # Forward pass
             outputs = model(spectrograms)
             
-            # Prepare for CTC loss
-            log_probs = F.log_softmax(outputs, dim=2).transpose(0, 1)  # (time, batch, classes)
-            input_lengths = torch.full(size=(outputs.size(0),), fill_value=outputs.size(1), dtype=torch.long)
+            log_probs = F.log_softmax(outputs, dim=2).transpose(0, 1)  
+            
+            seq_length = outputs.size(1)
+            if (batch_size, seq_length) in input_lengths_cache:
+                input_lengths = input_lengths_cache[(batch_size, seq_length)]
+            else:
+                input_lengths = torch.full(size=(batch_size,), fill_value=seq_length, dtype=torch.long)
+                input_lengths_cache[(batch_size, seq_length)] = input_lengths
+                
             target_lengths = torch.tensor([len(t) for t in transcripts], dtype=torch.long)
             
-            # Flatten targets into a 1D tensor - transcripts are already tensors
             targets = torch.cat(transcripts)
             
-            # Move tensors to device
             log_probs = log_probs.to(device)
             input_lengths = input_lengths.to(device)
             targets = targets.to(device)
             target_lengths = target_lengths.to(device)
             
-            # Calculate loss
             try:
                 loss = criterion(log_probs, targets, input_lengths, target_lengths)
+                
+                if not torch.isfinite(loss):
+                    print("Warning: non-finite loss, skipping batch")
+                    continue
+                    
+                loss.backward()
+                
+                # Apply gradient clipping
+                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_MAX_NORM)
+                
+                optimizer.step()
+                
+                total_loss += loss.item() * batch_size
+                total_samples += batch_size
+                batch_count += 1
+                
             except Exception as e:
-                tqdm.write(f"Error in CTC loss: {e}")
+                print(f"Error in batch: {e}")
                 continue
             
-            # Backward pass and optimize
-            loss.backward()
-            optimizer.step()
-            
-            # Update metrics
-            total_loss += loss.item()
-            batch_count += 1
-            
-            # Clean up memory
-            del spectrograms, outputs, log_probs, loss, targets, input_lengths, target_lengths
-            if device.type == 'mps':
-                torch.mps.empty_cache()
-                
-            # Add a small delay to allow memory to be freed
-            if device.type == 'mps' and batch_count % 5 == 0:
-                time.sleep(0.1)
-        
-        # Calculate average loss for the epoch
-        avg_loss = total_loss / batch_count if batch_count > 0 else float('inf')
         epoch_time = time.time() - epoch_start_time
+        train_loss = total_loss / total_samples if total_samples > 0 else float('inf')
         
-        # Update tqdm description with loss
-        tqdm.write(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Time: {epoch_time:.2f}s")
+        val_loss = validate(model, val_dataloader, criterion, device, input_lengths_cache)
         
-        # Update stats
-        stats["epochs"].append(epoch+1)
-        stats["losses"].append(avg_loss)
+        # Update learning rate based on validation loss
+        scheduler.step(val_loss)
+        
+        # Save statistics
+        stats["epochs"].append(epoch + 1)
+        stats["train_losses"].append(train_loss)
+        stats["val_losses"].append(val_loss)
+        stats["learning_rates"].append(optimizer.param_groups[0]['lr'])
         stats["times"].append(epoch_time)
         
-        # Save checkpoint
-        is_best = avg_loss < stats["best_loss"]
+        is_best = val_loss < stats["best_val_loss"]
         if is_best:
-            stats["best_loss"] = avg_loss
+            stats["best_val_loss"] = val_loss
+            
+        if train_loss < stats["best_train_loss"]:
+            stats["best_train_loss"] = train_loss
         
+        # Save checkpoint
         save_checkpoint({
             'epoch': epoch + 1,
             'model_state_dict': model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'loss': avg_loss,
+            'train_loss': train_loss,
+            'val_loss': val_loss,
             'stats': stats
         }, is_best)
+        
+        # Print epoch summary
+        print(f"Epoch {epoch+1}/{epochs} - Train Loss: {train_loss:.4f} - Val Loss: {val_loss:.4f} - Time: {epoch_time:.2f}s")
     
-    # Print training summary
-    total_time = time.time() - epoch_start_time
-    tqdm.write(f"\nTraining completed in {total_time:.2f} seconds")
-    tqdm.write(f"Best loss: {stats['best_loss']:.4f}")
+    tqdm.write(f"\nTraining completed in {sum(stats['times']):.2f} seconds")
+    tqdm.write(f"Best training loss: {stats['best_train_loss']:.4f}")
+    tqdm.write(f"Best validation loss: {stats['best_val_loss']:.4f}")
     
-    # Save final stats
     with open(f"{CHECKPOINT_DIR}/training_stats.json", 'w') as f:
         json.dump(stats, f)
     
     return stats
+
+def validate(model, dataloader, criterion, device, input_lengths_cache=None):
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    
+    with torch.no_grad():  
+        for batch in tqdm(dataloader, desc="Validation", leave=False):
+            spectrograms, transcripts = batch
+            batch_size = spectrograms.size(0)
+            
+            spectrograms = spectrograms.to(device)
+            
+            outputs = model(spectrograms)
+            
+            log_probs = F.log_softmax(outputs, dim=2).transpose(0, 1)
+            
+            seq_length = outputs.size(1)
+            if input_lengths_cache and (batch_size, seq_length) in input_lengths_cache:
+                input_lengths = input_lengths_cache[(batch_size, seq_length)]
+            else:
+                input_lengths = torch.full(size=(batch_size,), fill_value=seq_length, dtype=torch.long)
+                if input_lengths_cache is not None:
+                    input_lengths_cache[(batch_size, seq_length)] = input_lengths
+                    
+            target_lengths = torch.tensor([len(t) for t in transcripts], dtype=torch.long)
+            
+            targets = torch.cat(transcripts)
+            
+            # Make sure everything is on the same device
+            log_probs = log_probs.to(device)
+            input_lengths = input_lengths.to(device)
+            targets = targets.to(device)
+            target_lengths = target_lengths.to(device)
+            
+            try:
+                # If using custom criterion, calculate the same way as training
+                if criterion == weighted_ctc_loss:
+                    # Use standard CTC loss for validation
+                    base_criterion = nn.CTCLoss(blank=0, reduction='mean')
+                    loss = base_criterion(log_probs, targets, input_lengths, target_lengths)
+                else:
+                    loss = criterion(log_probs, targets, input_lengths, target_lengths)
+                    
+                total_loss += loss.item() * batch_size  
+                total_samples += batch_size
+            except Exception as e:
+                print(f"Error in validation: {e}")
+                continue
+    
+    avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
+    return avg_loss
+
+def weighted_ctc_loss(log_probs, targets, input_lengths, target_lengths):
+    """
+    Custom CTC loss that penalizes blank tokens
+    """
+    # Standard CTC loss
+    base_criterion = nn.CTCLoss(blank=0, reduction='none')
+    loss_per_batch = base_criterion(log_probs, targets, input_lengths, target_lengths)
+    
+    # Apply blank token penalty
+    probs = torch.exp(log_probs)
+    blank_probs = probs[:, :, 0]
+    
+    # Calculate mean blank probability per batch item
+    batch_sizes = input_lengths.size(0)
+    blank_penalties = []
+    
+    for i in range(batch_sizes):
+        # Get blank probabilities for this batch item
+        item_blank_probs = blank_probs[:input_lengths[i], i]
+        # Calculate mean blank probability
+        mean_blank_prob = item_blank_probs.mean()
+        # Add penalty proportional to blank probability
+        blank_penalties.append(mean_blank_prob.item())  # Get scalar value
+    
+    # Create tensor on the same device as loss_per_batch
+    blank_penalties = torch.tensor(blank_penalties, device=loss_per_batch.device)
+    
+    # Scale the blank penalty and add to original loss
+    # Use a much smaller penalty scale to avoid extremely high losses
+    weighted_loss = loss_per_batch + BLANK_PENALTY_SCALE * (1.0 - BLANK_WEIGHT) * blank_penalties
+    
+    return weighted_loss.mean()
 
 def save_checkpoint(state, is_best):
     torch.save(state, f"{CHECKPOINT_DIR}/latest_checkpoint.pt")
     if is_best:
         torch.save(state, f"{CHECKPOINT_DIR}/best_model.pt")
 
-def load_checkpoint():
-    checkpoint_path = f"{CHECKPOINT_DIR}/latest_checkpoint.pt"
-    if not os.path.exists(checkpoint_path):
-        print("No checkpoint found, starting from scratch")
-        return 0, float('inf')
-    
-    print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path)
-    
-    # Return epoch and best loss
-    return checkpoint['epoch'], checkpoint['stats']['best_loss']
+if torch.backends.mps.is_available():
+    device = torch.device("mps")
+    print("Using MPS (Apple Silicon)")
+elif torch.cuda.is_available():  
+    device = torch.device("cuda")
+    print("Using CUDA")
+else:
+    device = torch.device("cpu")
+    print("Using CPU")
 
-# Main execution
-if __name__ == "__main__":
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Train a speech-to-text model')
-    parser.add_argument('--force-cpu', action='store_true', help='Force CPU usage')
-    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE, help='Batch size')
-    parser.add_argument('--epochs', type=int, default=NUM_EPOCHS, help='Number of epochs')
-    args = parser.parse_args()
-    
-    # Update settings from command line
-    FORCE_CPU = args.force_cpu
-    BATCH_SIZE = args.batch_size
-    NUM_EPOCHS = args.epochs
-    
-    # Set device
-    if FORCE_CPU:
-        device = torch.device("cpu")
-        print("Using CPU (forced)")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-        print("Using MPS (Apple Silicon)")
-    elif torch.cuda.is_available():  
-        device = torch.device("cuda")
-        print("Using CUDA")
-    else:
-        device = torch.device("cpu")
-        print("Using CPU")
-    
-    # Load dataset
-    train_dataset = LibriSpeech(dataPath="./data", subset="train-clean-100")
-    
-    # Create data loader
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=0,
-        collate_fn=train_dataset.pad
-    )
-    
-    # Create model
-    model = SpeechCNN(num_classes=30)  # 30 characters in our vocabulary
-    
-    # Create optimizer
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-    
-    # Create loss function
-    criterion = nn.CTCLoss(blank=0, reduction='mean')
-    
-    # Load checkpoint if exists
-    start_epoch, best_loss = load_checkpoint()
-    
-    # Print training info
-    print(f"\nStarting training:")
-    print(f"- Epochs: {NUM_EPOCHS} (starting from {start_epoch})")
-    print(f"- Batch size: {BATCH_SIZE}")
-    print(f"- Samples: {len(train_dataset)}")
-    print(f"- Device: {device}")
-    
-    # Train the model
-    train(model, train_loader, optimizer, criterion, device, epochs=NUM_EPOCHS, start_epoch=start_epoch, best_loss=best_loss)
+# Create datasets
+train_dataset = LibriSpeech(DATA_DIR, TRAIN_DATASET)
+val_dataset = LibriSpeech(DATA_DIR, VAL_DATASET)
+
+# Create data loaders
+train_loader = DataLoader(
+    train_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    collate_fn=LibriSpeech.pad
+)
+
+val_loader = DataLoader(
+    val_dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=False,
+    collate_fn=LibriSpeech.pad
+)
+
+# Initialize model and optimizer
+model = SpeechLSTM(num_classes=LibriSpeech.NUM_CLASSES)
+optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+
+# Add learning rate scheduler - reduce LR when validation loss plateaus
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer, 
+    mode='min', 
+    factor=0.5, 
+    patience=2, 
+    verbose=True
+)
+
+# Use weighted CTC loss to penalize blank tokens
+criterion = weighted_ctc_loss
+
+# Load checkpoint if available
+start_epoch, best_loss = 0, float('inf')
+checkpoint_path = os.path.join(CHECKPOINT_DIR, 'latest_checkpoint.pt')
+if os.path.exists(checkpoint_path):
+    try:
+        print(f"\nLoading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path)
+        
+        try:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_loss = checkpoint.get('train_loss', float('inf'))
+            print(f"Resuming from epoch {start_epoch} with best loss: {best_loss:.4f}")
+        except RuntimeError as e:
+            print(f"Error loading checkpoint: {e}")
+            print("Model architecture has changed. Starting fresh training.")
+    except Exception as e:
+        print(f"Error loading checkpoint: {e}")
+        print("Starting fresh training.")
+else:
+    print("No checkpoint found. Starting fresh training.")
+
+print(f"\nStarting training:")
+print(f"- Epochs: {NUM_EPOCHS} (starting from {start_epoch})")
+print(f"- Batch size: {BATCH_SIZE}")
+print(f"- Learning rate: {LEARNING_RATE}")
+print(f"- Device: {device}")
+print(f"- Model parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
+
+train(model, train_loader, val_loader, optimizer, criterion, device, epochs=NUM_EPOCHS, start_epoch=start_epoch, best_loss=best_loss)

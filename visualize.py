@@ -10,6 +10,7 @@ import glob
 import librosa
 import numpy as np
 import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
@@ -58,20 +59,26 @@ def main():
     features_scaled = scaler.fit_transform(features)
     
     # Apply PCA to reduce dimensions to 2 for easy visualization.
-    pca = PCA(n_components=2)
+    pca = PCA(n_components=3)
     features_pca = pca.fit_transform(features_scaled)
     
     # Output the explained variance ratio for the principal components.
     print("Explained variance ratio:", pca.explained_variance_ratio_)
     
     # Create a scatter plot of the PCA-reduced features.
-    plt.figure(figsize=(8, 6))
-    scatter = plt.scatter(features_pca[:, 0], features_pca[:, 1],
-                          c=range(len(labels)), cmap='viridis', alpha=0.7)
-    plt.xlabel('Principal Component 1')
-    plt.ylabel('Principal Component 2')
-    plt.title('PCA Visualization of LibriSpeech MFCC Features')
-    plt.colorbar(scatter, label='Sample Index or Speaker ID')
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection='3d')
+
+# Plot PCA-reduced features
+    scatter = ax.scatter(features_pca[:, 0], features_pca[:, 1], features_pca[:, 2], 
+                      c=range(len(labels)), cmap='viridis', alpha=0.7)
+
+    ax.set_xlabel('Principal Component 1')
+    ax.set_ylabel('Principal Component 2')
+    ax.set_zlabel('Principal Component 3')
+    ax.set_title('3D PCA Visualization of LibriSpeech MFCC Features')
+
+
     plt.show()
 
 if __name__ == "__main__":

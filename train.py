@@ -37,12 +37,11 @@ CHECKPOINT_DIR = "./checkpoints"
 
 # Hyperparameters
 NUM_EPOCHS = 20
-BATCH_SIZE = 16  # Smaller batch size for better learning
-LEARNING_RATE = 5e-4  # Lower learning rate for more stability
+BATCH_SIZE = 32
+LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 1e-4
 GRAD_CLIP_MAX_NORM = 5.0
-BLANK_WEIGHT = 0.9  # Higher value = less penalty for blank tokens
-BLANK_PENALTY_SCALE = 0.1  # Scale factor for blank penalty
+WARMUP_EPOCHS = 2  # Number of epochs for learning rate warmup
 
 # Create checkpoint directory if it doesn't exist
 Path(CHECKPOINT_DIR).mkdir(exist_ok=True)
@@ -62,6 +61,7 @@ def train(model, dataloader, val_dataloader, optimizer, criterion, device, epoch
     }
     
     input_lengths_cache = {}
+    scheduler = None
     
     for epoch in tqdm(range(start_epoch, epochs), desc="Training Progress"):
         model.train()  
@@ -69,6 +69,13 @@ def train(model, dataloader, val_dataloader, optimizer, criterion, device, epoch
         total_loss = 0.0
         total_samples = 0  
         batch_count = 0
+        
+        # Apply learning rate warmup
+        if epoch < WARMUP_EPOCHS:
+            warmup_factor = (epoch + 1) / WARMUP_EPOCHS
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = LEARNING_RATE * warmup_factor
+                print(f"Warmup LR: {param_group['lr']:.6f}")
         
         for batch in tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}", leave=False):
             spectrograms, transcripts = batch
@@ -101,6 +108,30 @@ def train(model, dataloader, val_dataloader, optimizer, criterion, device, epoch
             try:
                 loss = criterion(log_probs, targets, input_lengths, target_lengths)
                 
+                # Print sample prediction every 50 batches
+                if batch_count % 50 == 0:
+                    with torch.no_grad():
+                        # Get sample prediction
+                        sample_output = outputs[0:1]
+                        probs = F.softmax(sample_output, dim=2)
+                        indices = torch.argmax(probs, dim=2)[0].cpu().numpy()
+                        
+                        # Simple decoding
+                        decoded = []
+                        prev_idx = -1
+                        for idx in indices:
+                            if idx != LibriSpeech.BLANK_INDEX and idx != prev_idx:
+                                if idx < len(dataloader.dataset.reverse_char_map):
+                                    decoded.append(dataloader.dataset.reverse_char_map[idx])
+                            prev_idx = idx
+                        
+                        prediction = ''.join(decoded)
+                        print(f"\nSample prediction: '{prediction}'")
+                        
+                        # Print unique indices to debug
+                        unique_indices = np.unique(indices)
+                        print(f"Unique indices: {unique_indices}")
+                
                 if not torch.isfinite(loss):
                     print("Warning: non-finite loss, skipping batch")
                     continue
@@ -126,6 +157,14 @@ def train(model, dataloader, val_dataloader, optimizer, criterion, device, epoch
         val_loss = validate(model, val_dataloader, criterion, device, input_lengths_cache)
         
         # Update learning rate based on validation loss
+        if scheduler is None:
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, 
+                mode='min', 
+                factor=0.5, 
+                patience=2, 
+                verbose=True
+            )
         scheduler.step(val_loss)
         
         # Save statistics
@@ -199,13 +238,7 @@ def validate(model, dataloader, criterion, device, input_lengths_cache=None):
             target_lengths = target_lengths.to(device)
             
             try:
-                # If using custom criterion, calculate the same way as training
-                if criterion == weighted_ctc_loss:
-                    # Use standard CTC loss for validation
-                    base_criterion = nn.CTCLoss(blank=0, reduction='mean')
-                    loss = base_criterion(log_probs, targets, input_lengths, target_lengths)
-                else:
-                    loss = criterion(log_probs, targets, input_lengths, target_lengths)
+                loss = criterion(log_probs, targets, input_lengths, target_lengths)
                     
                 total_loss += loss.item() * batch_size  
                 total_samples += batch_size
@@ -215,39 +248,6 @@ def validate(model, dataloader, criterion, device, input_lengths_cache=None):
     
     avg_loss = total_loss / total_samples if total_samples > 0 else float('inf')
     return avg_loss
-
-def weighted_ctc_loss(log_probs, targets, input_lengths, target_lengths):
-    """
-    Custom CTC loss that penalizes blank tokens
-    """
-    # Standard CTC loss
-    base_criterion = nn.CTCLoss(blank=0, reduction='none')
-    loss_per_batch = base_criterion(log_probs, targets, input_lengths, target_lengths)
-    
-    # Apply blank token penalty
-    probs = torch.exp(log_probs)
-    blank_probs = probs[:, :, 0]
-    
-    # Calculate mean blank probability per batch item
-    batch_sizes = input_lengths.size(0)
-    blank_penalties = []
-    
-    for i in range(batch_sizes):
-        # Get blank probabilities for this batch item
-        item_blank_probs = blank_probs[:input_lengths[i], i]
-        # Calculate mean blank probability
-        mean_blank_prob = item_blank_probs.mean()
-        # Add penalty proportional to blank probability
-        blank_penalties.append(mean_blank_prob.item())  # Get scalar value
-    
-    # Create tensor on the same device as loss_per_batch
-    blank_penalties = torch.tensor(blank_penalties, device=loss_per_batch.device)
-    
-    # Scale the blank penalty and add to original loss
-    # Use a much smaller penalty scale to avoid extremely high losses
-    weighted_loss = loss_per_batch + BLANK_PENALTY_SCALE * (1.0 - BLANK_WEIGHT) * blank_penalties
-    
-    return weighted_loss.mean()
 
 def save_checkpoint(state, is_best):
     torch.save(state, f"{CHECKPOINT_DIR}/latest_checkpoint.pt")
@@ -287,17 +287,8 @@ val_loader = DataLoader(
 model = SpeechLSTM(num_classes=LibriSpeech.NUM_CLASSES)
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
-# Add learning rate scheduler - reduce LR when validation loss plateaus
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, 
-    mode='min', 
-    factor=0.5, 
-    patience=2, 
-    verbose=True
-)
-
-# Use weighted CTC loss to penalize blank tokens
-criterion = weighted_ctc_loss
+# Use standard PyTorch CTC loss
+criterion = nn.CTCLoss(blank=LibriSpeech.BLANK_INDEX, reduction='mean')
 
 # Load checkpoint if available
 start_epoch, best_loss = 0, float('inf')

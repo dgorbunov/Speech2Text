@@ -2,11 +2,12 @@ import torch
 import torch.nn as nn
 from librispeech import NUM_MELS, LibriSpeech
 
-LSTM_HIDDEN_LAYERS = 128
+LSTM_HIDDEN_LAYERS = 256
 CNN_LAYER1_SIZE = 32
 CNN_LAYER2_SIZE = 64
 NUM_LSTM_LAYERS = 2
 DROPOUT_RATE = 0.3
+BLANK_TOKEN_BIAS = -5.0
 
 class SpeechLSTM(nn.Module):
     def __init__(self, num_classes=LibriSpeech.NUM_CLASSES):
@@ -65,7 +66,7 @@ class SpeechLSTM(nn.Module):
         # Add bias against blank token predictions
         if hasattr(self, 'fc'):
             blank_idx = LibriSpeech.BLANK_INDEX
-            self.fc.bias.data[blank_idx] = -2.0
+            self.fc.bias.data[blank_idx] = BLANK_TOKEN_BIAS
     
     def forward(self, x):
         # x shape: (batch_size, time_steps, n_mels)

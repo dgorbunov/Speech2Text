@@ -6,6 +6,7 @@
 #SBATCH -p short
 #SBATCH -t 12:00:00
 #SBATCH --gres=gpu:1
+#SBATCH -C H100 | A100 | A30
 module load python/3.10.13
 module load cuda
 

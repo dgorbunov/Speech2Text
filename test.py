@@ -175,7 +175,7 @@ test_loader = torch.utils.data.DataLoader(
     test_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    collate_fn=test_dataset.pad,
+    collate_fn=test_dataset.collate_fn,
     num_workers=0,
     pin_memory=True if torch.cuda.is_available() else False
 )

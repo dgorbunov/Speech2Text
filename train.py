@@ -289,8 +289,8 @@ val_loader = torch.utils.data.DataLoader(
 )
 
 # Initialize model and optimizer
-#model = SpeechLSTM(num_classes=LibriSpeech.NUM_CLASSES)
-model = SpeechTransformer(num_classes = LibriSpeech.NUM_CLASSES)
+model = SpeechLSTM(num_classes=LibriSpeech.NUM_CLASSES)
+#model = SpeechTransformer(num_classes = LibriSpeech.NUM_CLASSES)
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
 # Use standard PyTorch CTC loss

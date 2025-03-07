@@ -12,7 +12,7 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 from librispeech import LibriSpeech
-from cnn import SpeechCNN
+from cnn import SpeechCNN, SimpleCNN
 
 # Default settings
 NUM_EPOCHS = 10
@@ -186,7 +186,8 @@ if __name__ == "__main__":
     )
     
     # Create model
-    model = SpeechCNN(num_classes=30)  # 30 characters in our vocabulary
+    # model = SpeechCNN(num_classes=30)  # 30 characters in our vocabulary
+    model = SimpleCNN(num_classes=30)  # 30 characters in our vocabulary
     
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)

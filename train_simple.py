@@ -43,6 +43,7 @@ dataloader = DataLoader(
 print("Getting a batch...")
 batch = next(iter(dataloader))
 spectrograms, transcripts = batch
+transcripts = transcripts[0]
 print(f"Batch spectrograms shape: {spectrograms.shape}")
 print(f"Batch transcripts shape: {transcripts.shape}")
 

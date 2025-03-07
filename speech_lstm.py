@@ -96,20 +96,21 @@ class SpeechLSTM(nn.Module):
         # Handle pooling differently based on device
         if x.device.type == 'mps':
             # For MPS devices, use a different approach
-            # Reshape and flatten features
             x = x.permute(0, 3, 1, 2)  # (batch, width, channels, height)
             x = x.reshape(batch_size, width, channels * height)
             
             # Use linear projection to get to feature_dim
             if x.size(2) != self.feature_dim:
-                # Create a new projection layer if needed
                 proj = nn.Linear(x.size(2), self.feature_dim).to(x.device)
                 x = proj(x)
         else:
             # For CUDA or CPU devices, use adaptive pooling
             x = self.adaptive_pool(x)
             x = x.permute(0, 3, 1, 2)  # (batch, width, channels, height)
-            x = x.reshape(batch_size, width, channels * 4)  # 4 is from adaptive pool height
+
+            # Use the actual dimensions from the pooled output
+            _, _, pooled_height, _ = self.adaptive_pool(torch.zeros(1, channels, height, width)).size()
+            x = x.reshape(batch_size, width, channels * pooled_height)
             x = self.projection(x)
         
         # Apply LSTM

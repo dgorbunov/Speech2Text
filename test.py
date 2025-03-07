@@ -84,7 +84,7 @@ def test_model(model, dataset, test_loader, device, num_samples=NUM_TEST_SAMPLES
     print(f"- Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
     # Print model's final layer bias to check blank token bias
-    print(f"- Final layer bias for blank token: {model.fc.bias[LibriSpeech.BLANK_INDEX].item():.4f}")
+    print(f"- Final layer bias for blank token: {model.fc2.bias[LibriSpeech.BLANK_INDEX].item():.4f}")
     
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):

@@ -31,10 +31,15 @@ class SpeechLSTM(nn.Module):
         # Calculate feature dimension after pooling
         self.feature_dim = CONV2_OUT_CHANNELS * (NUM_MELS // 2)
         
+        # Projection layer between CNN and LSTM
+        self.cnn_projection = nn.Linear(self.feature_dim, 256)
+        self.proj_relu = nn.ReLU()
+        self.proj_dropout = nn.Dropout(DROPOUT_RATE)
+        
         # LSTM layer
         self.lstm_hidden_size = LSTM_HIDDEN_SIZE
         self.lstm = nn.LSTM(
-            input_size=self.feature_dim,
+            input_size=256,  # Using projected dimension
             hidden_size=self.lstm_hidden_size,
             num_layers=LSTM_LAYERS,
             bidirectional=True,
@@ -42,11 +47,18 @@ class SpeechLSTM(nn.Module):
             batch_first=True
         )
         
-        # Output layer
-        self.fc = nn.Linear(self.lstm_hidden_size * 2, num_classes)
+        # Output layer with intermediate layer for better feature extraction
+        self.fc1 = nn.Linear(self.lstm_hidden_size * 2, self.lstm_hidden_size)
+        self.fc_relu = nn.ReLU()
+        self.fc_dropout = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(self.lstm_hidden_size, num_classes)
         
         # Initialize weights
         self._init_weights()
+        
+        # Set a strong negative bias for blank token
+        with torch.no_grad():
+            self.fc2.bias[LibriSpeech.BLANK_INDEX] = -4.0
         
     def _init_weights(self):
         for m in self.modules():
@@ -97,11 +109,19 @@ class SpeechLSTM(nn.Module):
         x = x.permute(0, 2, 1, 3)  # [batch, new_time, channels, new_freq]
         x = x.reshape(batch_size, new_time, self.feature_dim)
         
+        # Apply projection before LSTM
+        x = self.cnn_projection(x)
+        x = self.proj_relu(x)
+        x = self.proj_dropout(x)
+        
         # Apply LSTM
         x, _ = self.lstm(x)
         
-        # Apply output layer
-        x = self.fc(x)
+        # Apply output layers
+        x = self.fc1(x)
+        x = self.fc_relu(x)
+        x = self.fc_dropout(x)
+        x = self.fc2(x)
         
         return x
     

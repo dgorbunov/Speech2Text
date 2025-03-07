@@ -77,8 +77,10 @@ def debug_model():
         hooks.append(model.conv1.register_forward_hook(get_activation_hook('conv1')))
         hooks.append(model.conv2.register_forward_hook(get_activation_hook('conv2')))
         hooks.append(model.pool.register_forward_hook(get_activation_hook('pool')))
+        hooks.append(model.cnn_projection.register_forward_hook(get_activation_hook('cnn_projection')))
         hooks.append(model.lstm.register_forward_hook(get_activation_hook('lstm')))
-        hooks.append(model.fc.register_forward_hook(get_activation_hook('fc_out')))
+        hooks.append(model.fc1.register_forward_hook(get_activation_hook('fc1')))
+        hooks.append(model.fc2.register_forward_hook(get_activation_hook('fc2')))
         
         try:
             # Forward pass

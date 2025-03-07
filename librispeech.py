@@ -4,7 +4,7 @@ from torchaudio.datasets import LIBRISPEECH
 from torch.nn.utils.rnn import pad_sequence
 from pathlib import Path
 
-NUM_MELS = 60 # num mel frequencies
+NUM_MELS = 80 # num mel frequencies
 FFT_BINS = 1024 # num fft frequencies
 FFT_WIN_LENGTH = 400 # samples in window (400 = 25ms at 16kHz sample rate)
 SPEC_HOP_LENGTH = 160 # samples between spectrogram frames (overlap - 160 = 60% overlap)

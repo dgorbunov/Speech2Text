@@ -4,44 +4,30 @@ import torch
 import torch.nn.functional as F
 from pathlib import Path
 from tqdm import tqdm
-from jiwer import wer
+from jiwer import wer, cer
 import matplotlib.pyplot as plt
 
 from librispeech import LibriSpeech
 from speech_lstm import SpeechLSTM
 
 # Test configuration
-NUM_TEST_SAMPLES = 5  # Number of samples to test and visualize
+NUM_TEST_SAMPLES = 5
 BATCH_SIZE = 64
 RESULTS_DIR = "./results"
 CHECKPOINT_DIR = "./checkpoints"
 TEST_DATASET = "test-clean"
 
 def calculate_cer(reference, hypothesis):
-    if len(reference) == 0:
-        return 1.0 if len(hypothesis) > 0 else 0.0
-    
-    # Simple Levenshtein distance implementation
-    m, n = len(reference), len(hypothesis)
-    distance = np.zeros((m+1, n+1), dtype=int)
-    
-    # Initialize first row and column
-    for i in range(m+1):
-        distance[i, 0] = i
-    for j in range(n+1):
-        distance[0, j] = j
-    
-    # Fill in the rest of the matrix
-    for i in range(1, m+1):
-        for j in range(1, n+1):
-            cost = 0 if reference[i-1] == hypothesis[j-1] else 1
-            distance[i, j] = min(
-                distance[i-1, j] + 1,      # Deletion
-                distance[i, j-1] + 1,      # Insertion
-                distance[i-1, j-1] + cost  # Substitution
-            )
-    
-    return distance[m, n] / m
+    try:
+        # Handle empty strings by adding a placeholder character
+        ref = reference if reference.strip() else "empty"
+        hyp = hypothesis if hypothesis.strip() else "empty"
+        
+        # Calculate CER using jiwer
+        return cer(ref, hyp)
+    except Exception as e:
+        print(f"Error calculating CER: {e}")
+        return 1.0  # Return worst case if calculation fails
 
 def greedy_decode(output, reverse_char_map, blank_idx=LibriSpeech.BLANK_INDEX):
     # Apply softmax to get probabilities
@@ -191,7 +177,7 @@ test_loader = torch.utils.data.DataLoader(
 model = SpeechLSTM()
 
 # Load the best checkpoint
-best_checkpoint_path = os.path.join(CHECKPOINT_DIR, 'best_checkpoint.pt')
+best_checkpoint_path = os.path.join(CHECKPOINT_DIR, 'best_model.pt')
 latest_checkpoint_path = os.path.join(CHECKPOINT_DIR, 'latest_checkpoint.pt')
 
 checkpoint_path = best_checkpoint_path if os.path.exists(best_checkpoint_path) else latest_checkpoint_path

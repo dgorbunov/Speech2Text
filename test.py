@@ -44,6 +44,11 @@ def greedy_decode(output, reverse_char_map, blank_idx=LibriSpeech.BLANK_INDEX):
     # Simple stats for debugging
     print(f"Unique prediction indices: {np.unique(indices)}")
     
+    # Count occurrences of each index for debugging
+    unique, counts = np.unique(indices, return_counts=True)
+    index_counts = dict(zip(unique, counts))
+    print(f"Index counts: {index_counts}")
+    
     # Apply CTC decoding rules (merge repeated characters and remove blanks)
     decoded_sequence = []
     prev_idx = -1  # Different from any valid index
@@ -78,6 +83,9 @@ def test_model(model, dataset, test_loader, device, num_samples=NUM_TEST_SAMPLES
     print(f"- Device: {device.type}")
     print(f"- Model parameters: {sum(p.numel() for p in model.parameters()):,}")
     
+    # Print model's final layer bias to check blank token bias
+    print(f"- Final layer bias for blank token: {model.fc.bias[LibriSpeech.BLANK_INDEX].item():.4f}")
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(test_loader, desc="Testing")):
             spectrograms, transcripts = batch
@@ -85,6 +93,23 @@ def test_model(model, dataset, test_loader, device, num_samples=NUM_TEST_SAMPLES
             
             spectrograms = spectrograms.to(device)
             outputs = model(spectrograms)
+            
+            # Check output statistics
+            if batch_idx == 0:
+                print(f"\nOutput stats for first batch:")
+                print(f"- Shape: {outputs.shape}")
+                print(f"- Min: {outputs.min().item():.4f}")
+                print(f"- Max: {outputs.max().item():.4f}")
+                print(f"- Mean: {outputs.mean().item():.4f}")
+                print(f"- Std: {outputs.std().item():.4f}")
+                
+                # Check class distribution after softmax
+                softmax_probs = F.softmax(outputs[0], dim=1)
+                class_means = softmax_probs.mean(dim=0).cpu().numpy()
+                top5_classes = np.argsort(class_means)[-5:]
+                print(f"- Top 5 average class probabilities:")
+                for cls in reversed(top5_classes):
+                    print(f"  Class {cls} ({reverse_char_map[cls]}): {class_means[cls]:.6f}")
             
             # Decode each sample in the batch
             for i in range(batch_size):

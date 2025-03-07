@@ -47,6 +47,12 @@ else:
 
 # Initialize model
 model = SpeechLSTM()
+
+# Initialize bias in the final layer to reduce blank predictions
+with torch.no_grad():
+    # Set a negative bias for the blank token (index 0)
+    model.fc.bias[LibriSpeech.BLANK_INDEX] = -2.0
+
 model.to(device)
 print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 

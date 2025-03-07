@@ -103,9 +103,6 @@ class SpeechLSTM(nn.Module):
         # Apply output layer
         x = self.fc(x)
         
-        # Scale output
-        x = x * 0.1
-        
         return x
     
     @classmethod

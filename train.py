@@ -1,9 +1,9 @@
 import os
 
-# Enable CPU fallback
+# MPS optimizations
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
-# Disable upper limit for memory allocations
 os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["PYTORCH_MPS_ENABLE_ASYNC_GPU_COPIES"] = "1"
 
 import torch
 import torch.nn as nn
@@ -37,7 +37,7 @@ CHECKPOINT_DIR = "./checkpoints"
 
 # Hyperparameters
 NUM_EPOCHS = 20
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 LEARNING_RATE = 5e-5
 WEIGHT_DECAY = 1e-4
 GRAD_CLIP_MAX_NORM = 5.0
@@ -269,18 +269,22 @@ train_dataset = LibriSpeech(DATA_DIR, TRAIN_DATASET)
 val_dataset = LibriSpeech(DATA_DIR, VAL_DATASET)
 
 # Create data loaders
-train_loader = DataLoader(
+train_loader = torch.utils.data.DataLoader(
     train_dataset,
     batch_size=BATCH_SIZE,
     shuffle=True,
-    collate_fn=LibriSpeech.pad
+    collate_fn=train_dataset.collate_fn,
+    num_workers=0,
+    pin_memory=True if torch.cuda.is_available() else False
 )
 
-val_loader = DataLoader(
+val_loader = torch.utils.data.DataLoader(
     val_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    collate_fn=LibriSpeech.pad
+    collate_fn=val_dataset.collate_fn,
+    num_workers=0,
+    pin_memory=True if torch.cuda.is_available() else False
 )
 
 # Initialize model and optimizer

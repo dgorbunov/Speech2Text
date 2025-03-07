@@ -1,4 +1,10 @@
 import os
+
+# MPS optimizations
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
+os.environ["PYTORCH_MPS_HIGH_WATERMARK_RATIO"] = "0.0"
+os.environ["PYTORCH_MPS_ENABLE_ASYNC_GPU_COPIES"] = "1"
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -6,7 +12,6 @@ from pathlib import Path
 from tqdm import tqdm
 from jiwer import wer, cer
 import matplotlib.pyplot as plt
-
 from librispeech import LibriSpeech
 from speech_lstm import SpeechLSTM
 
@@ -170,7 +175,9 @@ test_loader = torch.utils.data.DataLoader(
     test_dataset,
     batch_size=BATCH_SIZE,
     shuffle=False,
-    collate_fn=test_dataset.pad
+    collate_fn=test_dataset.pad,
+    num_workers=0,
+    pin_memory=True if torch.cuda.is_available() else False
 )
 
 # Initialize model
@@ -189,6 +196,11 @@ if os.path.exists(checkpoint_path):
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 else:
     print("No checkpoint found. Using untrained model.")
+
+# Optimize with TorchScript for Apple Silicon
+if device.type == "mps":
+    print("Optimizing model with TorchScript for faster MPS execution")
+    model = torch.jit.script(model)
 
 # Test the model
 test_model(model, test_dataset, test_loader, device)

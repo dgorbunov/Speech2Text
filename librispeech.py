@@ -58,7 +58,7 @@ class LibriSpeech(torch.utils.data.Dataset):
 
     # Pads spectrograms to max length, keeps transcripts unpadded — necessary for CTC loss
     @staticmethod
-    def pad(batch):
+    def collate_fn(batch):
         # Unpack batch
         spectrograms, transcripts = zip(*batch)
         

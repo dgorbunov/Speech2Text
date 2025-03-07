@@ -96,3 +96,9 @@ class SpeechLSTM(nn.Module):
     @classmethod
     def num_classes(cls):
         return LibriSpeech.NUM_CLASSES
+        
+    # Faster inference on MPS    
+    def to_torchscript(self):
+        self.eval()
+        example_input = torch.randn(1, 100, NUM_MELS)
+        return torch.jit.trace(self, example_input)

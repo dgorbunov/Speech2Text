@@ -8,3 +8,4 @@
 /__pycache__
 pyvenv.cfg
 venv/
+mel_to_audio

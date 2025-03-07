@@ -3,3 +3,5 @@ torchaudio
 matplotlib
 numpy
 tqdm
+soundfile
+jiwer

@@ -1,4 +1,18 @@
-from datasets import load_dataset
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.data import DataLoader
+import time
+import json
+from pathlib import Path
+from tqdm import tqdm
+from librispeech import LibriSpeech
+import numpy as np
+import random
 
-train_dataset = load_dataset("openslr/librispeech_asr", "clean", split = "Train.100", Streaming = True)
-print(train_dataset)
+TRAIN_DATASET = "dev-clean"
+VAL_DATASET = "dev-other"  
+DATA_DIR = "./data"
+CHECKPOINT_DIR = "./checkpoints"
+
+

@@ -5,6 +5,8 @@
 /include
 /lib
 /share
+/Data
+/venv
 /__pycache__
 pyvenv.cfg
 mel_to_audio

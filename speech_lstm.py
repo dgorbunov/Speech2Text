@@ -104,14 +104,14 @@ class SpeechLSTM(nn.Module):
                 proj = nn.Linear(x.size(2), self.feature_dim).to(x.device)
                 x = proj(x)
         else:
-            # For CUDA or CPU devices, use adaptive pooling
-            x = self.adaptive_pool(x)
+            # For CUDA or CPU devices, use a simpler approach
+            # Flatten the CNN output and use a fixed projection
             x = x.permute(0, 3, 1, 2)  # (batch, width, channels, height)
-
-            # Use the actual dimensions from the pooled output
-            _, _, pooled_height, _ = self.adaptive_pool(torch.zeros(1, channels, height, width)).size()
-            x = x.reshape(batch_size, width, channels * pooled_height)
-            x = self.projection(x)
+            x = x.contiguous().view(batch_size, width, -1)
+            
+            # Project to the required feature dimension
+            proj = nn.Linear(x.size(2), self.feature_dim).to(x.device)
+            x = proj(x)
         
         # Apply LSTM
         x, _ = self.lstm(x)

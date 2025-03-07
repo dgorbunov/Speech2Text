@@ -10,12 +10,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from torch.cuda.amp import GradScaler, autocast
 from tqdm import tqdm
 from pathlib import Path
 from librispeech import LibriSpeech
 import torch.nn.functional as F
 from speech_lstm import SpeechLSTM
+import json
 
 # Training configuration
 TRAIN_DATASET = "dev-clean"
@@ -32,19 +32,22 @@ WARMUP_EPOCHS = 3
 Path(CHECKPOINT_DIR).mkdir(exist_ok=True, parents=True)
 
 # Set device
+device = torch.device("cpu")
 if torch.backends.mps.is_available():
     device = torch.device("mps")
     print("Using MPS (Apple Silicon)")
 elif torch.cuda.is_available():
     device = torch.device("cuda")
-    print("Using CUDA")
+    print(f"Using CUDA - Device: {torch.cuda.get_device_name(0)}")
+    print(f"CUDA Version: {torch.version.cuda}")
+    print(f"GPU Count: {torch.cuda.device_count()}")
 else:
-    device = torch.device("cpu")
-    print("Using CPU")
+    print("Using CPU - No GPU detected")
 
 # Initialize model
 model = SpeechLSTM()
 model.to(device)
+print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
 # Create datasets
 train_dataset = LibriSpeech(dataPath="./data", subset=TRAIN_DATASET)
@@ -75,7 +78,13 @@ scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, ver
 criterion = nn.CTCLoss(blank=LibriSpeech.BLANK_INDEX, reduction='mean')
 
 # Mixed precision training
-scaler = GradScaler()
+use_amp = device.type == 'cuda'
+if use_amp:
+    from torch.amp import GradScaler, autocast
+    scaler = GradScaler(device_type='cuda')
+    print("Using mixed precision training with CUDA")
+else:
+    print("Mixed precision training disabled (not using CUDA)")
 
 def train():
     best_val_loss = float('inf')
@@ -104,7 +113,24 @@ def train():
 
             spectrograms = spectrograms.to(device)
 
-            with autocast():
+            if use_amp:
+                with autocast(device_type='cuda'):
+                    outputs = model(spectrograms)
+                    log_probs = F.log_softmax(outputs, dim=2).transpose(0, 1)
+
+                    input_lengths = torch.full(size=(batch_size,), fill_value=outputs.size(1), dtype=torch.long)
+                    target_lengths = torch.tensor([len(t) for t in transcripts], dtype=torch.long)
+                    targets = torch.cat(transcripts)
+
+                    loss = criterion(log_probs, targets, input_lengths, target_lengths)
+
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_MAX_NORM)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 outputs = model(spectrograms)
                 log_probs = F.log_softmax(outputs, dim=2).transpose(0, 1)
 
@@ -114,12 +140,10 @@ def train():
 
                 loss = criterion(log_probs, targets, input_lengths, target_lengths)
 
-            optimizer.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_MAX_NORM)
-            scaler.step(optimizer)
-            scaler.update()
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP_MAX_NORM)
+                optimizer.step()
 
             total_loss += loss.item() * batch_size
             total_samples += batch_size

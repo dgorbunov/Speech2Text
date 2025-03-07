@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 from librispeech import NUM_MELS, LibriSpeech
+from torch.nn import functional as F
 
-LSTM_HIDDEN_LAYERS = 256
-CNN_LAYER1_SIZE = 32
-CNN_LAYER2_SIZE = 64
-NUM_LSTM_LAYERS = 2
-DROPOUT_RATE = 0.3
-BLANK_TOKEN_BIAS = -5.0
+# Hyperparameters
+CNN_LAYER1_SIZE = 64
+CNN_LAYER2_SIZE = 128
+LSTM_HIDDEN_LAYERS = 512
+NUM_LSTM_LAYERS = 3
+DROPOUT_RATE = 0.2
 
 class SpeechLSTM(nn.Module):
     def __init__(self, num_classes=LibriSpeech.NUM_CLASSES):
@@ -15,28 +16,31 @@ class SpeechLSTM(nn.Module):
         
         # CNN for feature extraction
         self.cnn = nn.Sequential(
-            # First CNN layer with batch normalization
             nn.Conv2d(1, CNN_LAYER1_SIZE, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(CNN_LAYER1_SIZE),
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Dropout(DROPOUT_RATE),
             
-            # Second CNN layer with batch normalization
             nn.Conv2d(CNN_LAYER1_SIZE, CNN_LAYER2_SIZE, kernel_size=3, stride=1, padding=1),
             nn.BatchNorm2d(CNN_LAYER2_SIZE),
-            nn.ReLU(),
+            nn.LeakyReLU(0.1),
             nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Dropout(DROPOUT_RATE)
         )
         
-        # Calculate CNN output size for the LSTM input
-        cnn_output_height = NUM_MELS // 4  # After two MaxPool2d with stride 2
-        self.cnn_output_size = cnn_output_height * CNN_LAYER2_SIZE
+        # Feature dimension for LSTM
+        self.feature_dim = 512
         
-        # Bidirectional LSTM
+        # Adaptive pooling for non-MPS devices
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((4, 1))
+        
+        # Projection layer to convert CNN output to LSTM input
+        self.projection = nn.Linear(CNN_LAYER2_SIZE * 4, self.feature_dim)
+        
+        # LSTM for temporal context
         self.lstm = nn.LSTM(
-            input_size=self.cnn_output_size,
+            input_size=self.feature_dim,
             hidden_size=LSTM_HIDDEN_LAYERS,
             num_layers=NUM_LSTM_LAYERS,
             bidirectional=True,
@@ -44,52 +48,75 @@ class SpeechLSTM(nn.Module):
             batch_first=True
         )
         
-        # Fully connected layer for classification
-        self.fc = nn.Linear(LSTM_HIDDEN_LAYERS * 2, num_classes)
+        # Output projection
+        self.fc = nn.Sequential(
+            nn.Linear(LSTM_HIDDEN_LAYERS * 2, LSTM_HIDDEN_LAYERS),
+            nn.LayerNorm(LSTM_HIDDEN_LAYERS),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(DROPOUT_RATE),
+            nn.Linear(LSTM_HIDDEN_LAYERS, num_classes)
+        )
         
-        # Initialize weights using standard PyTorch initialization
+        # Initialize weights
         self._init_weights()
         
     def _init_weights(self):
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='leaky_relu')
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.ones_(m.weight)
                 nn.init.zeros_(m.bias)
             elif isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight)
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='leaky_relu')
                 nn.init.zeros_(m.bias)
         
-        # Add bias against blank token predictions
-        if hasattr(self, 'fc'):
-            blank_idx = LibriSpeech.BLANK_INDEX
-            self.fc.bias.data[blank_idx] = BLANK_TOKEN_BIAS
-    
+        for name, param in self.lstm.named_parameters():
+            if 'weight_ih' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'weight_hh' in name:
+                nn.init.orthogonal_(param.data)
+            elif 'bias' in name:
+                nn.init.zeros_(param.data)
+                
     def forward(self, x):
-        # x shape: (batch_size, time_steps, n_mels)
         batch_size, time_steps, n_mels = x.size()
         
-        # Add channel dimension for CNN
-        x = x.unsqueeze(1) # (batch_size, 1, time_steps, n_mels)
+        # Add channel dimension
+        x = x.unsqueeze(1)
         
-        # Prepare for CNN: (batch_size, 1, n_mels, time_steps)
-        x = x.permute(0, 1, 3, 2)
+        # Apply CNN
+        x = self.cnn(x)
         
-        # Apply CNN layers
-        x = self.cnn(x) # (batch_size, channels, n_mels/4, time_steps/4)
+        # Get dimensions
+        batch_size, channels, height, width = x.size()
         
-        # Reshape for LSTM
-        x = x.permute(0, 3, 1, 2) # (batch_size, time_steps/4, channels, n_mels/4)
-        x = x.reshape(batch_size, x.size(1), -1) # (batch_size, time_steps/4, channels*n_mels/4)
+        # Handle pooling differently based on device
+        if x.device.type == 'mps':
+            # For MPS devices, use a different approach
+            # Reshape and flatten features
+            x = x.permute(0, 3, 1, 2)  # (batch, width, channels, height)
+            x = x.reshape(batch_size, width, channels * height)
+            
+            # Use linear projection to get to feature_dim
+            if x.size(2) != self.feature_dim:
+                # Create a new projection layer if needed
+                proj = nn.Linear(x.size(2), self.feature_dim).to(x.device)
+                x = proj(x)
+        else:
+            # For CUDA or CPU devices, use adaptive pooling
+            x = self.adaptive_pool(x)
+            x = x.permute(0, 3, 1, 2)  # (batch, width, channels, height)
+            x = x.reshape(batch_size, width, channels * 4)  # 4 is from adaptive pool height
+            x = self.projection(x)
         
         # Apply LSTM
-        x, _ = self.lstm(x) # (batch_size, time_steps/4, 2*hidden_size)
+        x, _ = self.lstm(x)
         
-        # Apply final fully connected layer
-        x = self.fc(x) # (batch_size, time_steps/4, num_classes)
+        # Apply enhanced projection
+        x = self.fc(x)
         
         return x
     
@@ -97,7 +124,6 @@ class SpeechLSTM(nn.Module):
     def num_classes(cls):
         return LibriSpeech.NUM_CLASSES
         
-    # Faster inference on MPS    
     def to_torchscript(self):
         self.eval()
         example_input = torch.randn(1, 100, NUM_MELS)

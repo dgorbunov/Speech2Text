@@ -51,7 +51,7 @@ def greedy_decode(output, reverse_char_map, blank_idx=LibriSpeech.BLANK_INDEX):
     for idx in indices:
         # Skip blanks and repeated characters (CTC rules)
         if idx != blank_idx and idx != prev_idx:
-            if idx in reverse_char_map:
+            if idx < len(reverse_char_map):
                 decoded_sequence.append(reverse_char_map[idx])
         prev_idx = idx
     
@@ -158,11 +158,10 @@ def test_model(model, dataset, test_loader, device, num_samples=NUM_TEST_SAMPLES
     
     return avg_cer, avg_wer, sample_results
 
-# Determine device
 if torch.backends.mps.is_available():
     device = torch.device("mps")
     print("Using MPS (Apple Silicon)")
-elif torch.cuda.is_available():
+elif torch.cuda.is_available():  
     device = torch.device("cuda")
     print("Using CUDA")
 else:
@@ -191,16 +190,11 @@ checkpoint_path = best_checkpoint_path if os.path.exists(best_checkpoint_path) e
 
 if os.path.exists(checkpoint_path):
     print(f"Loading checkpoint from {checkpoint_path}")
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])
     print(f"Loaded checkpoint from epoch {checkpoint['epoch']}")
 else:
     print("No checkpoint found. Using untrained model.")
-
-# Optimize with TorchScript for Apple Silicon
-if device.type == "mps":
-    print("Optimizing model with TorchScript for faster MPS execution")
-    model = torch.jit.script(model)
 
 # Test the model
 test_model(model, test_dataset, test_loader, device)

@@ -10,3 +10,5 @@ pyvenv.cfg
 mel_to_audio
 results
 venv/
+analysis
+*.out

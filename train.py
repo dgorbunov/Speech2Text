@@ -13,6 +13,7 @@ from pathlib import Path
 from tqdm import tqdm
 from librispeech import LibriSpeech
 from cnn import SpeechCNN
+from conformer import ConformerASR
 
 # Default settings
 NUM_EPOCHS = 10
@@ -186,7 +187,8 @@ if __name__ == "__main__":
     )
     
     # Create model
-    model = SpeechCNN(num_classes=30)  # 30 characters in our vocabulary
+    # model = SpeechCNN(num_classes=30)  # 30 characters in our vocabulary
+    model = ConformerASR(num_classes = 30)
     
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
